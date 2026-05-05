@@ -6,369 +6,205 @@ from app.models.models import (
     Course, Section, Instructor, Room, Day, TimeSlot,
 )
 from app.schemas import ScheduleResult, ScheduleSlot
+from app.algorithms.common import (
+    create_random_position,
+    calculate_fitness,
+    copy_position,
+    repair_schedule,
+    sort_schedule,
+)
+from app.algorithms.pso_algorithm import run_pso_algorithm
 
 
-HARD_WEIGHT = 1.0
-SOFT_WEIGHT = 0.1
+def _build_algorithm_data(db: Session):
+    courses_db = db.query(Course).filter(Course.is_archived == False).all()
+    rooms_db = db.query(Room).all()
+    instructors_db = db.query(Instructor).all()
+    time_slots_db = db.query(TimeSlot).order_by(TimeSlot.slot_order).all()
+    days_db = db.query(Day).all()
 
+    courses = []
+    for c in courses_db:
+        sections = []
+        for s in c.sections:
+            if not s.is_archived:
+                sections.append({
+                    "id": s.section_id,
+                    "gender": s.gender,
+                    "capacity": s.capacity,
+                    "waitlist": 0,
+                })
+        prereq_codes = [p.code for p in c.prerequisites]
+        courses.append({
+            "id": c.code,
+            "name": c.name,
+            "department": c.department.name if c.department else "",
+            "level": c.level,
+            "credits": c.credits,
+            "type": "Lab" if c.is_lab else "Lecture",
+            "prerequisites": ",".join(prereq_codes) if prereq_codes else None,
+            "sections": sections,
+        })
 
-def _load_data(db: Session):
-    rooms = db.query(Room).all()
-    instructors = db.query(Instructor).all()
-    days = db.query(Day).all()
-    time_slots = db.query(TimeSlot).filter(TimeSlot.slot_type == "Class").order_by(TimeSlot.slot_order).all()
-    prayer_slots = db.query(TimeSlot).filter(TimeSlot.slot_type == "Prayer").all()
-    male_rooms = [r for r in rooms if r.gender == "Male"]
-    female_rooms = [r for r in rooms if r.gender == "Female"]
+    rooms = []
+    for r in rooms_db:
+        rooms.append({
+            "id": r.room_id,
+            "capacity": r.capacity,
+            "gender": r.gender,
+            "type": r.room_type,
+        })
+
+    professors = []
+    for i in instructors_db:
+        professors.append({
+            "id": i.instructor_id,
+            "name": i.name,
+            "gender": i.gender,
+            "department": i.department,
+            "min_hours": i.min_hours,
+            "max_hours": i.max_hours,
+        })
+
+    periods = []
+    for ts in time_slots_db:
+        periods.append({
+            "id": ts.label,
+            "type": ts.slot_type,
+            "start": ts.start_time,
+            "end": ts.end_time,
+        })
+
+    days = [d.name for d in days_db]
+
     return {
+        "courses": courses,
         "rooms": rooms,
-        "instructors": instructors,
+        "professors": professors,
+        "periods": periods,
         "days": days,
-        "time_slots": time_slots,
-        "prayer_labels": {ts.label for ts in prayer_slots},
-        "male_rooms": male_rooms,
-        "female_rooms": female_rooms,
-        "male_room_ids": {r.room_id for r in male_rooms},
-        "female_room_ids": {r.room_id for r in female_rooms},
-        "slot_order": {ts.label: ts.slot_order for ts in time_slots},
     }
 
 
-def _get_sections_for_courses(db: Session, course_ids: List[int], preferred_gender: str):
-    sections = (
-        db.query(Section)
-        .filter(Section.course_id.in_(course_ids), Section.is_archived == False)
-        .all()
-    )
-    gender_sections = [s for s in sections if s.gender == preferred_gender]
-    if gender_sections:
-        sections = gender_sections
-    return sections
+def _get_selected_course_codes(db: Session, course_ids: List[int]):
+    courses = db.query(Course).filter(Course.id.in_(course_ids)).all()
+    return [c.code for c in courses]
 
 
-def _get_eligible_instructors(data, section_gender, dept_name):
-    pool = [i for i in data["instructors"] if i.gender == section_gender and i.department == dept_name]
-    if not pool:
-        pool = [i for i in data["instructors"] if i.gender == section_gender]
-    if not pool:
-        pool = data["instructors"]
-    return pool
+def _schedule_to_slots(schedule) -> List[ScheduleSlot]:
+    slots = []
+    for item in schedule:
+        slots.append(ScheduleSlot(
+            course_code=item["course_id"],
+            course_name=item["course_name"],
+            section_id=item["section_id"],
+            department=item["department"],
+            instructor_name=item["professor"],
+            room=item["room"],
+            day=item["day"],
+            time=item["time"],
+            credits=item["credits"],
+            level=item.get("level", 1) if isinstance(item.get("level"), int) else 1,
+            gender=item["section_gender"],
+        ))
+    return slots
 
 
-def _get_consecutive_pairs(data):
-    slots = data["time_slots"]
-    pairs = []
-    for i in range(len(slots) - 1):
-        pairs.append((slots[i].label, slots[i + 1].label))
-    return pairs
+def _run_ga_with_client_algorithm(
+    selected_codes, data, gender, objective="student",
+    pop_size=60, generations=200, max_no_improvement=40
+):
+    start_time = time.time()
 
+    if not selected_codes:
+        return [], 0, {}
 
-def _create_random_schedule(sections, data, preferred_gender):
-    schedule = []
-    consecutive_pairs = _get_consecutive_pairs(data)
-    slot_labels = [ts.label for ts in data["time_slots"]]
+    population = []
+    scores = []
 
-    for section in sections:
-        course = section.course if hasattr(section, '_course_obj') else None
-        dept_name = ""
-        credits = 3
-        course_code = ""
-        course_name = ""
-        is_lab = False
+    for _ in range(pop_size):
+        position = create_random_position(selected_codes, data, gender)
+        score, stats = calculate_fitness(position)
+        population.append(position)
+        scores.append(score)
 
-        if hasattr(section, '_course_obj') and section._course_obj:
-            c = section._course_obj
-            dept_name = c.department.name if c.department else ""
-            credits = c.credits
-            course_code = c.code
-            course_name = c.name
-            is_lab = c.is_lab
+    best_idx = min(range(len(scores)), key=lambda i: scores[i])
+    global_best = copy_position(population[best_idx])
+    global_best_score = scores[best_idx]
+    global_best_stats = None
 
-        gender_rooms = data["male_rooms"] if section.gender == "Male" else data["female_rooms"]
-        if not gender_rooms:
-            gender_rooms = data["rooms"]
+    _, global_best_stats = calculate_fitness(global_best)
 
-        instructors = _get_eligible_instructors(data, section.gender, dept_name)
-        instructor = random.choice(instructors)
-        room = random.choice(gender_rooms)
+    no_improvement = 0
+    iterations_completed = 0
 
-        if credits <= 2:
-            day1 = random.choice(data["days"])
-            day2 = random.choice([d for d in data["days"] if d != day1] or data["days"])
-            t1 = random.choice(slot_labels)
-            t2 = random.choice(slot_labels)
-            for day, t in [(day1, t1), (day2, t2)]:
-                schedule.append({
-                    "course_code": course_code,
-                    "course_name": course_name,
-                    "section_id": section.section_id,
-                    "department": dept_name,
-                    "gender": section.gender,
-                    "level": section._course_obj.level if hasattr(section, '_course_obj') and section._course_obj else 1,
-                    "credits": credits,
-                    "is_lab": is_lab,
-                    "instructor_id": instructor.instructor_id,
-                    "instructor_name": instructor.name,
-                    "room_id": room.room_id,
-                    "room_capacity": room.capacity,
-                    "room_type": room.room_type,
-                    "day": day.code,
-                    "time": t,
-                    "enrolled": section.enrolled or 10,
-                    "capacity": section.capacity,
-                })
-        elif credits == 3:
-            day1 = random.choice(data["days"])
-            day2 = random.choice(data["days"])
-            if consecutive_pairs:
-                pair = random.choice(consecutive_pairs)
-                t_a, t_b = pair
-            else:
-                t_a = random.choice(slot_labels)
-                t_b = random.choice(slot_labels)
-            t_c = random.choice(slot_labels)
-            for day, t in [(day1, t_a), (day1, t_b), (day2, t_c)]:
-                schedule.append({
-                    "course_code": course_code,
-                    "course_name": course_name,
-                    "section_id": section.section_id,
-                    "department": dept_name,
-                    "gender": section.gender,
-                    "level": section._course_obj.level if hasattr(section, '_course_obj') and section._course_obj else 1,
-                    "credits": credits,
-                    "is_lab": is_lab,
-                    "instructor_id": instructor.instructor_id,
-                    "instructor_name": instructor.name,
-                    "room_id": room.room_id,
-                    "room_capacity": room.capacity,
-                    "room_type": room.room_type,
-                    "day": day.code,
-                    "time": t,
-                    "enrolled": section.enrolled or 10,
-                    "capacity": section.capacity,
-                })
-        else:
-            day1 = random.choice(data["days"])
-            day2 = random.choice(data["days"])
-            if consecutive_pairs:
-                p1 = random.choice(consecutive_pairs)
-                p2 = random.choice(consecutive_pairs)
-            else:
-                p1 = (random.choice(slot_labels), random.choice(slot_labels))
-                p2 = (random.choice(slot_labels), random.choice(slot_labels))
-            for day, t in [(day1, p1[0]), (day1, p1[1]), (day2, p2[0]), (day2, p2[1])]:
-                schedule.append({
-                    "course_code": course_code,
-                    "course_name": course_name,
-                    "section_id": section.section_id,
-                    "department": dept_name,
-                    "gender": section.gender,
-                    "level": section._course_obj.level if hasattr(section, '_course_obj') and section._course_obj else 1,
-                    "credits": credits,
-                    "is_lab": is_lab,
-                    "instructor_id": instructor.instructor_id,
-                    "instructor_name": instructor.name,
-                    "room_id": room.room_id,
-                    "room_capacity": room.capacity,
-                    "room_type": room.room_type,
-                    "day": day.code,
-                    "time": t,
-                    "enrolled": section.enrolled or 10,
-                    "capacity": section.capacity,
-                })
-    return schedule
+    for gen in range(generations):
+        iterations_completed = gen + 1
 
+        ranked = sorted(range(len(population)), key=lambda i: scores[i])
+        elite_count = max(2, pop_size // 10)
 
-def _calculate_fitness(schedule, data, objective="student"):
-    conflicts = 0.0
-    slot_order = data["slot_order"]
-    prayer_labels = data["prayer_labels"]
-    male_room_ids = data["male_room_ids"]
-    female_room_ids = data["female_room_ids"]
+        new_population = []
+        new_scores = []
 
-    for i, si in enumerate(schedule):
-        if si["time"] in prayer_labels:
-            conflicts += HARD_WEIGHT
-        if si["room_capacity"] < si.get("enrolled", 0):
-            conflicts += HARD_WEIGHT
-        if si["gender"] == "Female" and si["room_id"] in male_room_ids:
-            conflicts += HARD_WEIGHT
-        if si["gender"] == "Male" and si["room_id"] in female_room_ids:
-            conflicts += HARD_WEIGHT
+        for idx in ranked[:elite_count]:
+            new_population.append(copy_position(population[idx]))
+            new_scores.append(scores[idx])
 
-        for j in range(i + 1, len(schedule)):
-            sj = schedule[j]
-            if si["day"] == sj["day"] and si["time"] == sj["time"]:
-                if si["instructor_id"] == sj["instructor_id"]:
-                    conflicts += HARD_WEIGHT
-                if si["room_id"] == sj["room_id"]:
-                    conflicts += HARD_WEIGHT
-                if (si["level"] == sj["level"] and si["gender"] == sj["gender"]
-                        and si["course_code"] != sj["course_code"]
-                        and not (si["is_lab"] and sj["is_lab"])):
-                    conflicts += HARD_WEIGHT
+        while len(new_population) < pop_size:
+            t1 = random.sample(ranked, min(5, len(ranked)))
+            t2 = random.sample(ranked, min(5, len(ranked)))
+            p1_idx = min(t1, key=lambda i: scores[i])
+            p2_idx = min(t2, key=lambda i: scores[i])
 
-    if objective == "student":
-        level_days = {}
-        for si in schedule:
-            key = (si["level"], si["gender"])
-            level_days.setdefault(key, set()).add(si["day"])
-        for days in level_days.values():
-            if len(days) > 3:
-                conflicts += SOFT_WEIGHT * (len(days) - 3)
-
-        last_slot = max(slot_order.values()) if slot_order else 99
-        for si in schedule:
-            idx = slot_order.get(si["time"], 0)
-            if idx == last_slot:
-                conflicts += SOFT_WEIGHT
-            elif idx == last_slot - 1:
-                conflicts += SOFT_WEIGHT * 0.5
-
-    elif objective == "instructor":
-        inst_days = {}
-        for si in schedule:
-            inst_days.setdefault(si["instructor_id"], set()).add(si["day"])
-        for days in inst_days.values():
-            if len(days) > 3:
-                conflicts += SOFT_WEIGHT * (len(days) - 3)
-
-    elif objective == "university":
-        room_usage = {}
-        for si in schedule:
-            room_usage[si["room_id"]] = room_usage.get(si["room_id"], 0) + 1
-        num_slots = len(data["days"]) * len(data["time_slots"])
-        for used in room_usage.values():
-            if num_slots > 0 and used / num_slots < 0.1:
-                conflicts += SOFT_WEIGHT * 0.5
-
-    return {"score": conflicts, "fitness": 1.0 / (1.0 + conflicts)}
-
-
-def _mutate_schedule(schedule, data, mutation_rate=0.15):
-    new_schedule = [item.copy() for item in schedule]
-    slot_labels = [ts.label for ts in data["time_slots"]]
-    for item in new_schedule:
-        if random.random() < mutation_rate:
-            item["day"] = random.choice(data["days"]).code
-            item["time"] = random.choice(slot_labels)
-        if random.random() < mutation_rate / 2:
-            gender_rooms = data["male_rooms"] if item["gender"] == "Male" else data["female_rooms"]
-            if not gender_rooms:
-                gender_rooms = data["rooms"]
-            room = random.choice(gender_rooms)
-            item["room_id"] = room.room_id
-            item["room_capacity"] = room.capacity
-            item["room_type"] = room.room_type
-        if random.random() < mutation_rate / 2:
-            instructors = _get_eligible_instructors(data, item["gender"], item["department"])
-            inst = random.choice(instructors)
-            item["instructor_id"] = inst.instructor_id
-            item["instructor_name"] = inst.name
-    return new_schedule
-
-
-def _run_ga(sections, data, objective, pop_size=60, mutation_rate=0.12, max_gens=500):
-    population = [_create_random_schedule(sections, data, None) for _ in range(pop_size)]
-    fitnesses = [_calculate_fitness(s, data, objective) for s in population]
-
-    elite_count = max(2, pop_size // 20)
-    tournament_size = 5
-
-    for gen in range(max_gens):
-        ranked = sorted(zip(population, fitnesses), key=lambda x: x[1]["score"])
-        population = [s for s, _ in ranked]
-        fitnesses = [f for _, f in ranked]
-
-        if fitnesses[0]["score"] == 0:
-            break
-
-        new_pop = population[:elite_count]
-        while len(new_pop) < pop_size:
-            t1 = random.sample(list(zip(population, fitnesses)), tournament_size)
-            t2 = random.sample(list(zip(population, fitnesses)), tournament_size)
-            p1 = min(t1, key=lambda x: x[1]["score"])[0]
-            p2 = min(t2, key=lambda x: x[1]["score"])[0]
+            parent1 = population[p1_idx]
+            parent2 = population[p2_idx]
 
             child = []
-            for k in range(max(len(p1), len(p2))):
-                if k < len(p1) and k < len(p2):
-                    child.append(p1[k].copy() if random.random() > 0.5 else p2[k].copy())
-                elif k < len(p1):
-                    child.append(p1[k].copy())
+            for k in range(max(len(parent1), len(parent2))):
+                if k < len(parent1) and k < len(parent2):
+                    child.append(parent1[k].copy() if random.random() > 0.5 else parent2[k].copy())
+                elif k < len(parent1):
+                    child.append(parent1[k].copy())
                 else:
-                    child.append(p2[k].copy())
+                    child.append(parent2[k].copy())
 
-            child = _mutate_schedule(child, data, mutation_rate)
-            new_pop.append(child)
+            mutation_rate = 0.15
+            for item in child:
+                if random.random() < mutation_rate:
+                    from app.algorithms.common import randomize_assignment
+                    child[child.index(item)] = randomize_assignment(item, data, gender)
 
-        population = new_pop
-        fitnesses = [_calculate_fitness(s, data, objective) for s in population]
+            child = repair_schedule(child, data, gender)
+            child_score, _ = calculate_fitness(child)
+            new_population.append(child)
+            new_scores.append(child_score)
 
-    ranked = sorted(zip(population, fitnesses), key=lambda x: x[1]["score"])
-    return [(s, f) for s, f in ranked[:3]]
+        population = new_population
+        scores = new_scores
 
+        current_best_idx = min(range(len(scores)), key=lambda i: scores[i])
+        if scores[current_best_idx] < global_best_score:
+            global_best = copy_position(population[current_best_idx])
+            global_best_score = scores[current_best_idx]
+            _, global_best_stats = calculate_fitness(global_best)
+            no_improvement = 0
+        else:
+            no_improvement += 1
 
-def _run_pso(sections, data, preferred_gender, swarm_size=40, iterations=80):
-    def copy_schedule(s):
-        return [item.copy() for item in s]
+        if global_best_stats and global_best_stats["feasible"]:
+            if global_best_stats["student_gaps"] == 0 and global_best_stats["instructor_gaps"] == 0:
+                break
 
-    def move_toward(source, target, probability=0.45):
-        new_s = copy_schedule(source)
-        for i in range(min(len(new_s), len(target))):
-            if random.random() < probability:
-                new_s[i]["day"] = target[i]["day"]
-                new_s[i]["time"] = target[i]["time"]
-            if random.random() < probability / 2:
-                new_s[i]["room_id"] = target[i]["room_id"]
-                new_s[i]["room_capacity"] = target[i]["room_capacity"]
-                new_s[i]["room_type"] = target[i].get("room_type", "")
-            if random.random() < probability / 2:
-                new_s[i]["instructor_id"] = target[i]["instructor_id"]
-                new_s[i]["instructor_name"] = target[i]["instructor_name"]
-        return new_s
-
-    particles = [_create_random_schedule(sections, data, preferred_gender) for _ in range(swarm_size)]
-    personal_best = [copy_schedule(p) for p in particles]
-    personal_best_fitness = [_calculate_fitness(p, data, "student") for p in particles]
-
-    best_idx = min(range(swarm_size), key=lambda i: personal_best_fitness[i]["score"])
-    global_best = copy_schedule(personal_best[best_idx])
-    global_best_fitness = personal_best_fitness[best_idx]
-
-    for _ in range(iterations):
-        for i in range(swarm_size):
-            particle = particles[i]
-            particle = move_toward(particle, personal_best[i], 0.35)
-            particle = move_toward(particle, global_best, 0.50)
-            particle = _mutate_schedule(particle, data, 0.18)
-
-            fitness = _calculate_fitness(particle, data, "student")
-            particles[i] = particle
-
-            if fitness["score"] < personal_best_fitness[i]["score"]:
-                personal_best[i] = copy_schedule(particle)
-                personal_best_fitness[i] = fitness
-                if fitness["score"] < global_best_fitness["score"]:
-                    global_best = copy_schedule(particle)
-                    global_best_fitness = fitness
-
-    all_results = list(zip(
-        [copy_schedule(p) for p in personal_best],
-        personal_best_fitness,
-    ))
-    all_results.append((global_best, global_best_fitness))
-    all_results.sort(key=lambda x: x[1]["score"])
-    seen = set()
-    unique = []
-    for s, f in all_results:
-        key = tuple(sorted((item["course_code"], item["day"], item["time"]) for item in s))
-        if key not in seen:
-            seen.add(key)
-            unique.append((s, f))
-        if len(unique) >= 3:
+        if no_improvement >= max_no_improvement:
             break
-    return unique[:3]
+
+    final_schedule = sort_schedule(global_best)
+    final_score, final_stats = calculate_fitness(final_schedule)
+    final_stats["computation_time"] = round(time.time() - start_time, 3)
+    final_stats["iterations_completed"] = iterations_completed
+
+    return final_schedule, final_score, final_stats
 
 
 OBJ_META = {
@@ -394,66 +230,103 @@ def run_schedule_generation(
     objective: str = "student",
     preferred_gender: str = "Male",
 ) -> List[ScheduleResult]:
-    data = _load_data(db)
-    sections = _get_sections_for_courses(db, selected_course_ids, preferred_gender)
+    data = _build_algorithm_data(db)
+    selected_codes = _get_selected_course_codes(db, selected_course_ids)
 
-    if not sections:
+    if not selected_codes:
         return []
 
-    courses_map = {}
-    for sec in sections:
-        if sec.course_id not in courses_map:
-            course = db.query(Course).filter(Course.id == sec.course_id).first()
-            courses_map[sec.course_id] = course
-        sec._course_obj = courses_map[sec.course_id]
+    results = []
 
     if algorithm.upper() == "PSO":
-        raw_results = _run_pso(sections, data, preferred_gender)
-        objectives = ["student"] * len(raw_results)
+        schedule, score, stats = run_pso_algorithm(
+            selected_courses=selected_codes,
+            data=data,
+            gender=preferred_gender,
+            swarm_size=50,
+            iterations=150,
+            max_no_improvement=40,
+        )
+
+        if schedule:
+            slots = _schedule_to_slots(schedule)
+            fitness_val = 1.0 / (1.0 + score) if score >= 0 else 0
+            results.append(ScheduleResult(
+                rank=1,
+                label="PSO-Optimized",
+                description="Particle Swarm Optimization - best schedule found",
+                fitness=round(fitness_val, 4),
+                conflicts=round(score, 2),
+                objective="student",
+                slots=slots,
+            ))
+
+        for run in range(2):
+            extra_schedule, extra_score, extra_stats = run_pso_algorithm(
+                selected_courses=selected_codes,
+                data=data,
+                gender=preferred_gender,
+                swarm_size=30,
+                iterations=80,
+                max_no_improvement=25,
+            )
+            if extra_schedule:
+                extra_slots = _schedule_to_slots(extra_schedule)
+                extra_fitness = 1.0 / (1.0 + extra_score) if extra_score >= 0 else 0
+                results.append(ScheduleResult(
+                    rank=run + 2,
+                    label=f"PSO Alternative {run + 1}",
+                    description="Alternative schedule from PSO",
+                    fitness=round(extra_fitness, 4),
+                    conflicts=round(extra_score, 2),
+                    objective="student",
+                    slots=extra_slots,
+                ))
+
+        results.sort(key=lambda r: r.fitness, reverse=True)
+        for i, r in enumerate(results, 1):
+            r.rank = i
+
     else:
         if objective == "all":
-            raw_results = []
-            objectives = []
             for obj in ["university", "instructor", "student"]:
-                res = _run_ga(sections, data, obj)
-                if res:
-                    raw_results.append(res[0])
-                    objectives.append(obj)
+                schedule, score, stats = _run_ga_with_client_algorithm(
+                    selected_codes, data, preferred_gender, objective=obj
+                )
+                if schedule:
+                    slots = _schedule_to_slots(schedule)
+                    fitness_val = 1.0 / (1.0 + score) if score >= 0 else 0
+                    meta = OBJ_META.get(obj, {"label": obj.title(), "description": ""})
+                    results.append(ScheduleResult(
+                        rank=len(results) + 1,
+                        label=meta["label"],
+                        description=meta["description"],
+                        fitness=round(fitness_val, 4),
+                        conflicts=round(score, 2),
+                        objective=obj,
+                        slots=slots,
+                    ))
         else:
-            raw_results = _run_ga(sections, data, objective)
-            objectives = [objective] * len(raw_results)
+            for run in range(3):
+                schedule, score, stats = _run_ga_with_client_algorithm(
+                    selected_codes, data, preferred_gender, objective=objective
+                )
+                if schedule:
+                    slots = _schedule_to_slots(schedule)
+                    fitness_val = 1.0 / (1.0 + score) if score >= 0 else 0
+                    meta = OBJ_META.get(objective, {"label": objective.title(), "description": ""})
+                    results.append(ScheduleResult(
+                        rank=run + 1,
+                        label=meta["label"] if run == 0 else f"{meta['label']} (Alt {run})",
+                        description=meta["description"],
+                        fitness=round(fitness_val, 4),
+                        conflicts=round(score, 2),
+                        objective=objective,
+                        slots=slots,
+                    ))
 
-    results = []
-    for rank, (idx_data) in enumerate(zip(raw_results, objectives), 1):
-        (schedule, fitness), obj = idx_data
-        meta = OBJ_META.get(obj, {"label": obj.title(), "description": ""})
-        slots = []
-        for item in schedule:
-            slots.append(ScheduleSlot(
-                course_code=item["course_code"],
-                course_name=item["course_name"],
-                section_id=item["section_id"],
-                department=item["department"],
-                instructor_name=item["instructor_name"],
-                room=item["room_id"],
-                day=item["day"],
-                time=item["time"],
-                credits=item["credits"],
-                level=item["level"],
-                gender=item["gender"],
-            ))
-        results.append(ScheduleResult(
-            rank=rank,
-            label=meta["label"],
-            description=meta["description"],
-            fitness=round(fitness["fitness"], 4),
-            conflicts=round(fitness["score"], 2),
-            objective=obj,
-            slots=slots,
-        ))
-
-    results.sort(key=lambda r: r.fitness, reverse=True)
-    for i, r in enumerate(results, 1):
-        r.rank = i
+        results.sort(key=lambda r: r.fitness, reverse=True)
+        for i, r in enumerate(results, 1):
+            r.rank = i
 
     return results[:3]
