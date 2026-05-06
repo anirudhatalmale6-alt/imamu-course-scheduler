@@ -523,6 +523,14 @@ def calculate_fitness(schedule, objective="student", data=None):
                 conflicts += SOFT * 0.5
                 room_utilization_penalty += 1
 
+        for item in schedule:
+            capacity = item["room_capacity"]
+            enrolled = item["section_capacity"]
+            if enrolled > 0 and capacity > enrolled * 2:
+                ratio = capacity / enrolled
+                conflicts += SOFT * 0.5 * min(ratio / 2, 2.0)
+                room_utilization_penalty += 1
+
         course_day_slots = {}
         for item in schedule:
             cid = item["course_id"]
@@ -535,7 +543,7 @@ def calculate_fitness(schedule, objective="student", data=None):
                 for k in range(len(slots) - 1):
                     gap = slots[k + 1] - slots[k]
                     if gap > 1:
-                        conflicts += SOFT * gap
+                        conflicts += SOFT * 0.3 * gap
                         student_gaps += gap
 
         if len(instructor_hours) > 1:

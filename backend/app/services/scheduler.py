@@ -252,6 +252,7 @@ def _run_ga_with_client_algorithm(
     elapsed = time.time() - start_time
     status = "FEASIBLE" if final_stats["feasible"] else f"{final_stats['hard_violations']} hard violations"
     print(f"    Result: {status} | Conflicts: {final_score:.2f} | Time: {elapsed:.2f}s | Gens: {iterations_completed}")
+    print(f"    Hard: {final_stats['hard_violations']} | Soft: {final_stats['soft_cost']:.2f}")
 
     return final_schedule, final_score, final_stats
 
