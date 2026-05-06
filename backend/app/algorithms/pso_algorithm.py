@@ -13,6 +13,7 @@ def run_pso_algorithm(
     selected_courses,
     data,
     gender,
+    objective="student",
     swarm_size=50,
     iterations=150,
     max_no_improvement=40,
@@ -67,7 +68,7 @@ def run_pso_algorithm(
             gender
         )
 
-        score, stats = calculate_fitness(position)
+        score, stats = calculate_fitness(position, objective=objective, data=data)
 
         particles.append(position)
         personal_best_positions.append(copy_position(position))
@@ -96,7 +97,7 @@ def run_pso_algorithm(
                 gender=gender
             )
 
-            new_score, new_stats = calculate_fitness(new_position)
+            new_score, new_stats = calculate_fitness(new_position, objective=objective, data=data)
 
             particles[i] = new_position
 
@@ -132,7 +133,7 @@ def run_pso_algorithm(
 
     final_schedule = sort_schedule(global_best_position)
 
-    final_score, final_stats = calculate_fitness(final_schedule)
+    final_score, final_stats = calculate_fitness(final_schedule, objective=objective, data=data)
 
     final_stats["computation_time"] = round(time.time() - start_time, 3)
     final_stats["iterations_completed"] = iterations_completed

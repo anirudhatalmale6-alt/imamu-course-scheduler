@@ -1,21 +1,9 @@
 import random
 import re
-import statistics
 
 
-HARD_CONSTRAINT_WEIGHT = 1000
-
-SOFT_WEIGHTS = {
-    "student_gaps": 10,
-    "student_days": 5,
-    "instructor_gaps": 8,
-    "instructor_days": 4,
-    "late_slots": 6,
-    "room_utilization": 3,
-    "workload_balance": 5,
-    "instructor_min_load": 4,
-    "consecutive_sections": 2
-}
+HARD = 1.0
+SOFT = 0.1
 
 
 def safe_int(value, default=0):
@@ -409,243 +397,230 @@ def repair_schedule(schedule, data, gender, max_attempts=80):
     return repaired
 
 
-def calculate_hard_constraints(schedule):
-    violations = {
+def calculate_fitness(schedule, objective="student", data=None):
+    """Fitness matching GA_runner.py calculate_fitness_multi exactly."""
+    conflicts = 0.0
+
+    instructor_days_map = {}
+    instructor_slots_map = {}
+    instructor_hours = {}
+    room_usage = {}
+    student_days_map = {}
+
+    for item in schedule:
+        iid = item["professor_id"]
+        rid = item["room"]
+        level = item["level"]
+        sgender = item["section_gender"]
+        day = item["day"]
+        slot_idx = item["period_number"]
+        credits = max(item["credits"], 1)
+
+        instructor_hours[iid] = instructor_hours.get(iid, 0) + credits
+        room_usage[rid] = room_usage.get(rid, 0) + 1
+        instructor_days_map.setdefault(iid, set()).add(day)
+        instructor_slots_map.setdefault(iid, []).append((day, slot_idx))
+        student_days_map.setdefault((level, sgender), set()).add(day)
+
+    if data:
+        class_periods = get_class_periods(data)
+        all_pnums = [period_number(p["id"]) for p in class_periods]
+        last_slot = max(all_pnums) if all_pnums else 99
+    else:
+        all_slots = [item["period_number"] for item in schedule]
+        last_slot = max(all_slots) if all_slots else 99
+
+    course_schedule_map = {}
+    for item in schedule:
+        cid = item["course_id"]
+        key = (item["day"], item["period"])
+        course_schedule_map.setdefault(cid, []).append(key)
+
+    hv = {
         "instructor_double_booking": 0,
         "room_double_booking": 0,
         "student_group_conflict": 0,
         "capacity_issues": 0,
         "prayer_time_violations": 0,
         "gender_separation_violations": 0,
-        "prerequisite_overlap": 0
+        "prerequisite_overlap": 0,
     }
-
-    for item in schedule:
-        if item["room_capacity"] < item["section_capacity"]:
-            violations["capacity_issues"] += 1
-
-        if not gender_matches(item["section_gender"], item["room_gender"]):
-            violations["gender_separation_violations"] += 1
-
-        if not gender_matches(item["section_gender"], item["professor_gender"]):
-            violations["gender_separation_violations"] += 1
-
-        period_text = str(item.get("period", "")).lower()
-        time_text = str(item.get("time", "")).lower()
-
-        if "prayer" in period_text or "prayer" in time_text:
-            violations["prayer_time_violations"] += 1
 
     for i in range(len(schedule)):
-        for j in range(i + 1, len(schedule)):
-            first = schedule[i]
-            second = schedule[j]
+        ci = schedule[i]
 
-            if not same_time(first, second):
+        if ci["room_capacity"] < ci["section_capacity"]:
+            conflicts += HARD
+            hv["capacity_issues"] += 1
+
+        period_text = str(ci.get("period", "")).lower()
+        time_text = str(ci.get("time", "")).lower()
+        if "prayer" in period_text or "prayer" in time_text:
+            conflicts += HARD
+            hv["prayer_time_violations"] += 1
+
+        if not gender_matches(ci["section_gender"], ci["room_gender"]):
+            conflicts += HARD
+            hv["gender_separation_violations"] += 1
+
+        prereqs = ci.get("prerequisites", [])
+        if prereqs:
+            my_key = (ci["day"], ci["period"])
+            for prereq_id in prereqs:
+                if prereq_id in course_schedule_map:
+                    if my_key in course_schedule_map[prereq_id]:
+                        conflicts += HARD
+                        hv["prerequisite_overlap"] += 1
+
+        for j in range(i + 1, len(schedule)):
+            cj = schedule[j]
+            if not same_time(ci, cj):
                 continue
 
-            if first["professor_id"] == second["professor_id"]:
-                violations["instructor_double_booking"] += 1
+            if ci["professor_id"] == cj["professor_id"]:
+                conflicts += HARD
+                hv["instructor_double_booking"] += 1
 
-            if first["room"] == second["room"]:
-                violations["room_double_booking"] += 1
+            if ci["room"] == cj["room"]:
+                conflicts += HARD
+                hv["room_double_booking"] += 1
 
-            if first["cohort_key"] == second["cohort_key"]:
-                violations["student_group_conflict"] += 1
+            same_lvl = ci["level"] == cj["level"]
+            same_gen = ci["section_gender"] == cj["section_gender"]
+            same_crs = ci["course_id"] == cj["course_id"]
+            both_lab = ci["course_type"] == "Lab" and cj["course_type"] == "Lab"
+            if same_lvl and same_gen and not same_crs and not both_lab:
+                conflicts += HARD
+                hv["student_group_conflict"] += 1
 
-            first_prerequisites = set(first.get("prerequisites", []))
-            second_prerequisites = set(second.get("prerequisites", []))
+    total_hard = sum(hv.values())
 
-            if second["course_id"] in first_prerequisites:
-                violations["prerequisite_overlap"] += 1
+    instructor_min_load_penalty = 0.0
+    if instructor_hours:
+        avg_hrs = sum(instructor_hours.values()) / len(instructor_hours)
+        for iid, actual in instructor_hours.items():
+            if actual < avg_hrs * 0.5:
+                penalty = avg_hrs * 0.5 - actual
+                conflicts += SOFT * penalty
+                instructor_min_load_penalty += penalty
 
-            if first["course_id"] in second_prerequisites:
-                violations["prerequisite_overlap"] += 1
+    student_gaps = 0
+    student_days_count = 0
+    instructor_gaps = 0
+    instructor_days_count = 0
+    late_slots = 0
+    room_utilization_penalty = 0
+    workload_balance_penalty = 0
 
-    return violations
+    if objective == "university":
+        if data:
+            num_slots = len(data["days"]) * len(get_class_periods(data))
+        else:
+            num_slots = 45
+        for rid, used in room_usage.items():
+            util = used / num_slots if num_slots > 0 else 0
+            if util < 0.1:
+                conflicts += SOFT * 0.5
+                room_utilization_penalty += 1
 
+        course_day_slots = {}
+        for item in schedule:
+            cid = item["course_id"]
+            day = item["day"]
+            idx = item["period_number"]
+            course_day_slots.setdefault((cid, day), []).append(idx)
+        for slots in course_day_slots.values():
+            if len(slots) > 1:
+                slots.sort()
+                for k in range(len(slots) - 1):
+                    gap = slots[k + 1] - slots[k]
+                    if gap > 1:
+                        conflicts += SOFT * gap
+                        student_gaps += gap
 
-def calculate_gaps_by_key(schedule, key_name):
-    groups = {}
+        if len(instructor_hours) > 1:
+            avg_h = sum(instructor_hours.values()) / len(instructor_hours)
+            for hrs in instructor_hours.values():
+                if hrs > avg_h * 2:
+                    conflicts += SOFT
+                    workload_balance_penalty += 1
 
-    for item in schedule:
-        key = item[key_name]
+    elif objective == "instructor":
+        for iid, days in instructor_days_map.items():
+            if len(days) > 3:
+                conflicts += SOFT * (len(days) - 3)
+                instructor_days_count += len(days) - 3
 
-        if key not in groups:
-            groups[key] = {}
+        for iid, slot_list in instructor_slots_map.items():
+            by_day = {}
+            for (day, idx) in slot_list:
+                by_day.setdefault(day, []).append(idx)
+            for slots in by_day.values():
+                slots.sort()
+                for k in range(len(slots) - 1):
+                    gap = slots[k + 1] - slots[k]
+                    if gap > 1:
+                        conflicts += SOFT * gap
+                        instructor_gaps += gap
 
-        day = item["day"]
+        if len(instructor_hours) > 1:
+            avg_h = sum(instructor_hours.values()) / len(instructor_hours)
+            for hrs in instructor_hours.values():
+                if hrs > avg_h * 2:
+                    conflicts += SOFT
+                    workload_balance_penalty += 1
 
-        if day not in groups[key]:
-            groups[key][day] = []
+    elif objective == "student":
+        for (level, sgender), days in student_days_map.items():
+            if len(days) > 3:
+                conflicts += SOFT * (len(days) - 3)
+                student_days_count += len(days) - 3
 
-        groups[key][day].append(item["period_number"])
+        level_slots = {}
+        for item in schedule:
+            key = (item["level"], item["section_gender"], item["day"])
+            idx = item["period_number"]
+            level_slots.setdefault(key, []).append(idx)
+        for slots in level_slots.values():
+            slots.sort()
+            for k in range(len(slots) - 1):
+                gap = slots[k + 1] - slots[k]
+                if gap > 1:
+                    conflicts += SOFT * gap
+                    student_gaps += gap
 
-    total_gaps = 0
-    total_days = 0
-    consecutive_sections = 0
-
-    for key in groups:
-        used_days = groups[key]
-        total_days += len(used_days)
-
-        for day in used_days:
-            periods = sorted(used_days[day])
-
-            for i in range(len(periods) - 1):
-                difference = periods[i + 1] - periods[i]
-
-                if difference == 1:
-                    consecutive_sections += 1
-
-                elif difference > 1:
-                    total_gaps += difference - 1
-
-    return total_gaps, total_days, consecutive_sections
-
-
-def calculate_room_utilization_penalty(schedule):
-    penalty = 0
-
-    for item in schedule:
-        room_capacity = max(item["room_capacity"], 1)
-        enrolled = item["section_capacity"]
-
-        utilization = enrolled / room_capacity
-
-        if utilization < 0.50:
-            penalty += 2
-
-        elif utilization < 0.70:
-            penalty += 1
-
-    return penalty
-
-
-def calculate_late_slot_penalty(schedule):
-    penalty = 0
-
-    for item in schedule:
-        if item["period_number"] >= 7:
-            penalty += 1
-
-    return penalty
-
-
-def calculate_workload_balance_penalty(schedule):
-    professor_loads = {}
-
-    for item in schedule:
-        professor_id = item["professor_id"]
-
-        if professor_id not in professor_loads:
-            professor_loads[professor_id] = 0
-
-        professor_loads[professor_id] += max(item["credits"], 1)
-
-    if len(professor_loads) <= 1:
-        return 0
-
-    loads = list(professor_loads.values())
-    return statistics.pstdev(loads)
-
-
-def calculate_instructor_min_load_penalty(schedule):
-    professor_loads = {}
-    professor_min_hours = {}
-
-    for item in schedule:
-        professor_id = item["professor_id"]
-
-        if professor_id not in professor_loads:
-            professor_loads[professor_id] = 0
-
-        professor_loads[professor_id] += max(item["credits"], 1)
-        professor_min_hours[professor_id] = item["professor_min_hours"]
-
-    penalty = 0
-
-    for professor_id in professor_loads:
-        minimum = professor_min_hours.get(professor_id, 0)
-
-        if minimum > 0 and professor_loads[professor_id] < minimum:
-            penalty += minimum - professor_loads[professor_id]
-
-    return penalty
-
-
-def calculate_soft_constraints(schedule):
-    student_gaps, student_days, student_consecutive = calculate_gaps_by_key(
-        schedule,
-        "cohort_key"
-    )
-
-    instructor_gaps, instructor_days, instructor_consecutive = calculate_gaps_by_key(
-        schedule,
-        "professor_id"
-    )
-
-    room_utilization_penalty = calculate_room_utilization_penalty(schedule)
-    late_slot_penalty = calculate_late_slot_penalty(schedule)
-    workload_balance_penalty = calculate_workload_balance_penalty(schedule)
-    instructor_min_load_penalty = calculate_instructor_min_load_penalty(schedule)
-
-    soft_values = {
-        "student_gaps": student_gaps,
-        "student_days": student_days,
-        "instructor_gaps": instructor_gaps,
-        "instructor_days": instructor_days,
-        "late_slots": late_slot_penalty,
-        "room_utilization": room_utilization_penalty,
-        "workload_balance": workload_balance_penalty,
-        "instructor_min_load": instructor_min_load_penalty,
-        "consecutive_sections": -(student_consecutive + instructor_consecutive)
-    }
-
-    soft_cost = 0
-
-    for key, value in soft_values.items():
-        soft_cost += value * SOFT_WEIGHTS[key]
-
-    return soft_cost, soft_values
-
-
-def calculate_fitness(schedule):
-    hard_violations = calculate_hard_constraints(schedule)
-    soft_cost, soft_values = calculate_soft_constraints(schedule)
-
-    total_hard_violations = sum(hard_violations.values())
-
-    fitness_score = (
-        total_hard_violations * HARD_CONSTRAINT_WEIGHT
-        + soft_cost
-    )
+        for item in schedule:
+            idx = item["period_number"]
+            if idx == last_slot:
+                conflicts += SOFT
+                late_slots += 1
+            elif idx == last_slot - 1:
+                conflicts += SOFT * 0.5
+                late_slots += 1
 
     stats = {
-        "fitness_score": round(fitness_score, 2),
-        "hard_violations": total_hard_violations,
-        "soft_cost": round(soft_cost, 2),
-        "feasible": total_hard_violations == 0,
-
-        "instructor_double_booking": hard_violations["instructor_double_booking"],
-        "room_double_booking": hard_violations["room_double_booking"],
-        "student_group_conflict": hard_violations["student_group_conflict"],
-        "capacity_issues": hard_violations["capacity_issues"],
-        "prayer_time_violations": hard_violations["prayer_time_violations"],
-        "gender_separation_violations": hard_violations["gender_separation_violations"],
-        "prerequisite_overlap": hard_violations["prerequisite_overlap"],
-
-        "student_gaps": soft_values["student_gaps"],
-        "student_days": soft_values["student_days"],
-        "instructor_gaps": soft_values["instructor_gaps"],
-        "instructor_days": soft_values["instructor_days"],
-        "late_slots": soft_values["late_slots"],
-        "room_utilization_penalty": soft_values["room_utilization"],
-        "workload_balance_penalty": round(soft_values["workload_balance"], 2),
-        "instructor_min_load_penalty": soft_values["instructor_min_load"]
+        "fitness_score": round(conflicts, 2),
+        "hard_violations": total_hard,
+        "soft_cost": round(conflicts - total_hard * HARD, 2),
+        "feasible": total_hard == 0,
+        "instructor_double_booking": hv["instructor_double_booking"],
+        "room_double_booking": hv["room_double_booking"],
+        "student_group_conflict": hv["student_group_conflict"],
+        "capacity_issues": hv["capacity_issues"],
+        "prayer_time_violations": hv["prayer_time_violations"],
+        "gender_separation_violations": hv["gender_separation_violations"],
+        "prerequisite_overlap": hv["prerequisite_overlap"],
+        "student_gaps": student_gaps,
+        "student_days": student_days_count,
+        "instructor_gaps": instructor_gaps,
+        "instructor_days": instructor_days_count,
+        "late_slots": late_slots,
+        "room_utilization_penalty": room_utilization_penalty,
+        "workload_balance_penalty": workload_balance_penalty,
+        "instructor_min_load_penalty": round(instructor_min_load_penalty, 2),
     }
 
-    return fitness_score, stats
+    return conflicts, stats
 
 
 def copy_assignment_from_best(current_item, best_item):

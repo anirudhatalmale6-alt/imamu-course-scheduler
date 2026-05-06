@@ -162,7 +162,7 @@ def _run_ga_with_client_algorithm(
 
     for _ in range(pop_size):
         position = create_random_position(selected_codes, data, gender)
-        score, stats = calculate_fitness(position)
+        score, stats = calculate_fitness(position, objective=objective, data=data)
         population.append(position)
         scores.append(score)
 
@@ -171,7 +171,7 @@ def _run_ga_with_client_algorithm(
     global_best_score = scores[best_idx]
     global_best_stats = None
 
-    _, global_best_stats = calculate_fitness(global_best)
+    _, global_best_stats = calculate_fitness(global_best, objective=objective, data=data)
 
     no_improvement = 0
     iterations_completed = 0
@@ -213,7 +213,7 @@ def _run_ga_with_client_algorithm(
                     child[idx_c] = randomize_assignment(child[idx_c], data, gender)
 
             child = repair_schedule(child, data, gender)
-            child_score, _ = calculate_fitness(child)
+            child_score, _ = calculate_fitness(child, objective=objective, data=data)
             new_population.append(child)
             new_scores.append(child_score)
 
@@ -224,7 +224,7 @@ def _run_ga_with_client_algorithm(
         if scores[current_best_idx] < global_best_score:
             global_best = copy_position(population[current_best_idx])
             global_best_score = scores[current_best_idx]
-            _, global_best_stats = calculate_fitness(global_best)
+            _, global_best_stats = calculate_fitness(global_best, objective=objective, data=data)
             no_improvement = 0
         else:
             no_improvement += 1
@@ -245,7 +245,7 @@ def _run_ga_with_client_algorithm(
             break
 
     final_schedule = sort_schedule(global_best)
-    final_score, final_stats = calculate_fitness(final_schedule)
+    final_score, final_stats = calculate_fitness(final_schedule, objective=objective, data=data)
     final_stats["computation_time"] = round(time.time() - start_time, 3)
     final_stats["iterations_completed"] = iterations_completed
 
@@ -293,18 +293,20 @@ def run_schedule_generation(
     results = []
 
     if algorithm.upper() == "PSO":
+        meta = OBJ_META.get(objective, {"label": objective.title(), "description": ""})
         print(f"\n{'='*60}")
-        print(f"  PSO-Optimized  (top 3)")
+        print(f"  PSO {meta['label']}  (top 3)")
         print(f"{'='*60}")
 
         schedule, score, stats = run_pso_algorithm(
             selected_courses=selected_codes,
             data=data,
             gender=preferred_gender,
+            objective=objective,
             swarm_size=50,
             iterations=150,
             max_no_improvement=40,
-            label="PSO-Optimized",
+            label=f"PSO {meta['label']}",
             run_number=1,
             total_runs=3,
         )
@@ -314,11 +316,11 @@ def run_schedule_generation(
             fitness_val = 1.0 / (1.0 + score) if score >= 0 else 0
             results.append(ScheduleResult(
                 rank=1,
-                label="PSO-Optimized",
-                description="Particle Swarm Optimization - best schedule found",
+                label=f"PSO {meta['label']}",
+                description=meta["description"],
                 fitness=round(fitness_val, 4),
                 conflicts=round(score, 2),
-                objective="student",
+                objective=objective,
                 slots=slots,
             ))
 
@@ -327,6 +329,7 @@ def run_schedule_generation(
                 selected_courses=selected_codes,
                 data=data,
                 gender=preferred_gender,
+                objective=objective,
                 swarm_size=30,
                 iterations=80,
                 max_no_improvement=25,
@@ -343,7 +346,7 @@ def run_schedule_generation(
                     description="Alternative schedule from PSO",
                     fitness=round(extra_fitness, 4),
                     conflicts=round(extra_score, 2),
-                    objective="student",
+                    objective=objective,
                     slots=extra_slots,
                 ))
 
