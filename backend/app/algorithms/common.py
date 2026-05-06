@@ -299,10 +299,13 @@ def create_random_position(selected_courses, data, gender):
     position = []
 
     for section in sections:
-        assignment = create_assignment(section, data, gender)
+        num_slots = max(section["credits"], 1)
 
-        if assignment is not None:
-            position.append(assignment)
+        for _ in range(num_slots):
+            assignment = create_assignment(section, data, gender)
+
+            if assignment is not None:
+                position.append(assignment)
 
     position = repair_schedule(position, data, gender)
 
