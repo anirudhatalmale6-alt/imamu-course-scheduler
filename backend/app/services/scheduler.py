@@ -91,9 +91,21 @@ def _get_selected_course_codes(db: Session, course_ids: List[int]):
     return [c.code for c in courses]
 
 
+DAY_NAME_TO_CODE = {
+    "Sunday": "SUN", "Monday": "MON", "Tuesday": "TUE",
+    "Wednesday": "WED", "Thursday": "THU",
+}
+
+
 def _schedule_to_slots(schedule) -> List[ScheduleSlot]:
     slots = []
     for item in schedule:
+        day_raw = item["day"]
+        day_code = DAY_NAME_TO_CODE.get(day_raw, day_raw)
+
+        time_raw = item["time"]
+        time_label = time_raw.replace(" - ", "-").replace(" ", "")
+
         slots.append(ScheduleSlot(
             course_code=item["course_id"],
             course_name=item["course_name"],
@@ -101,8 +113,8 @@ def _schedule_to_slots(schedule) -> List[ScheduleSlot]:
             department=item["department"],
             instructor_name=item["professor"],
             room=item["room"],
-            day=item["day"],
-            time=item["time"],
+            day=day_code,
+            time=time_label,
             credits=item["credits"],
             level=item.get("level", 1) if isinstance(item.get("level"), int) else 1,
             gender=item["section_gender"],

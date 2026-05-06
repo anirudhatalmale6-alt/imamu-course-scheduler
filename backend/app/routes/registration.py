@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List
 from app.database import get_db
-from app.models.models import User, Course, Section, student_registrations
+from app.models.models import User, UserRole, Course, Section, student_registrations
 from app.schemas import SectionResponse
 from app.services.auth import get_current_user
 
@@ -23,7 +23,7 @@ def register_for_section(
     if not course:
         raise HTTPException(status_code=404, detail="Course not found")
 
-    if course.prerequisites:
+    if course.prerequisites and current_user.role == UserRole.STUDENT:
         completed_codes = {c.code for c in current_user.completed_courses}
         missing = [p.code for p in course.prerequisites if p.code not in completed_codes]
         if missing:
