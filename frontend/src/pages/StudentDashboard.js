@@ -8,6 +8,7 @@ export default function StudentDashboard() {
   const [activePage, setActivePage] = useState('courses');
   const [courses, setCourses] = useState([]);
   const [registrations, setRegistrations] = useState([]);
+  const [completedCourses, setCompletedCourses] = useState([]);
   const [departments, setDepartments] = useState([]);
   const [scheduleResults, setScheduleResults] = useState([]);
   const [savedSchedules, setSavedSchedules] = useState([]);
@@ -22,16 +23,18 @@ export default function StudentDashboard() {
 
   const loadData = useCallback(async () => {
     try {
-      const [coursesRes, regRes, deptRes, tsRes] = await Promise.all([
+      const [coursesRes, regRes, deptRes, tsRes, completedRes] = await Promise.all([
         courseAPI.list(),
         registrationAPI.myRegistrations(),
         dataAPI.departments(),
         dataAPI.timeslots(),
+        registrationAPI.getCompleted(),
       ]);
       setCourses(coursesRes.data);
       setRegistrations(regRes.data);
       setDepartments(deptRes.data);
       setTimeSlots(tsRes.data.filter(t => t.slot_type === 'Class'));
+      setCompletedCourses(completedRes.data);
     } catch (err) { console.error(err); }
   }, []);
 
@@ -56,7 +59,7 @@ export default function StudentDashboard() {
       setTimeout(() => setMsg(''), 2000);
     } catch (err) {
       setMsg(err.response?.data?.detail || 'Registration failed');
-      setTimeout(() => setMsg(''), 3000);
+      setTimeout(() => setMsg(''), 4000);
     }
   };
 
@@ -64,6 +67,30 @@ export default function StudentDashboard() {
     try {
       await registrationAPI.unregister(sectionId);
       setMsg('Unregistered');
+      loadData();
+      setTimeout(() => setMsg(''), 2000);
+    } catch (err) {
+      setMsg(err.response?.data?.detail || 'Failed');
+      setTimeout(() => setMsg(''), 3000);
+    }
+  };
+
+  const handleMarkCompleted = async (courseId) => {
+    try {
+      await registrationAPI.markCompleted(courseId);
+      setMsg('Course marked as completed!');
+      loadData();
+      setTimeout(() => setMsg(''), 2000);
+    } catch (err) {
+      setMsg(err.response?.data?.detail || 'Failed');
+      setTimeout(() => setMsg(''), 3000);
+    }
+  };
+
+  const handleUnmarkCompleted = async (courseId) => {
+    try {
+      await registrationAPI.unmarkCompleted(courseId);
+      setMsg('Removed from completed');
       loadData();
       setTimeout(() => setMsg(''), 2000);
     } catch (err) {
@@ -125,6 +152,16 @@ export default function StudentDashboard() {
 
   const registeredSectionIds = new Set(registrations.map(r => r.section_id || r.id));
   const registeredCourseIds = new Set(registrations.map(r => r.course_id));
+  const completedCourseCodes = new Set(completedCourses.map(c => c.code));
+  const completedCourseIds = new Set(completedCourses.map(c => c.id));
+
+  const getPrerequisiteStatus = (course) => {
+    if (!course.prerequisites || course.prerequisites.length === 0) {
+      return { met: true, missing: [] };
+    }
+    const missing = course.prerequisites.filter(code => !completedCourseCodes.has(code));
+    return { met: missing.length === 0, missing };
+  };
 
   const filteredCourses = courses.filter(c => {
     if (filterDept && c.department_id !== parseInt(filterDept)) return false;
@@ -143,6 +180,9 @@ export default function StudentDashboard() {
         <nav className="sidebar-nav">
           <button className={`nav-item ${activePage === 'courses' ? 'active' : ''}`} onClick={() => setActivePage('courses')}>
             Browse Courses
+          </button>
+          <button className={`nav-item ${activePage === 'completed' ? 'active' : ''}`} onClick={() => setActivePage('completed')}>
+            Completed Courses ({completedCourses.length})
           </button>
           <button className={`nav-item ${activePage === 'registered' ? 'active' : ''}`} onClick={() => setActivePage('registered')}>
             My Registrations ({registrations.length})
@@ -165,7 +205,7 @@ export default function StudentDashboard() {
       </aside>
 
       <main className="main-content">
-        {msg && <div className="error-msg" style={{ marginBottom: 16, background: msg.includes('fail') || msg.includes('Please') ? '#fef2f2' : '#ecfdf5', color: msg.includes('fail') || msg.includes('Please') ? '#dc2626' : '#059669' }}>{msg}</div>}
+        {msg && <div className="error-msg" style={{ marginBottom: 16, background: msg.includes('fail') || msg.includes('Please') || msg.includes('not met') || msg.includes('must complete') ? '#fef2f2' : '#ecfdf5', color: msg.includes('fail') || msg.includes('Please') || msg.includes('not met') || msg.includes('must complete') ? '#dc2626' : '#059669' }}>{msg}</div>}
 
         {generating && (
           <div className="generating-overlay">
@@ -179,6 +219,9 @@ export default function StudentDashboard() {
           <>
             <div className="page-header">
               <h1>Browse Courses</h1>
+              <p style={{ fontSize: '0.85rem', color: '#6b7280', marginTop: 4 }}>
+                Mark courses you already passed in "Completed Courses" to unlock prerequisites.
+              </p>
             </div>
             <div className="filters">
               <select value={filterDept} onChange={e => setFilterDept(e.target.value)}>
@@ -200,49 +243,174 @@ export default function StudentDashboard() {
                       <th>Department</th>
                       <th>Level</th>
                       <th>Credits</th>
+                      <th>Prerequisites</th>
                       <th>Sections</th>
                       <th>Action</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {filteredCourses.map(course => (
-                      <React.Fragment key={course.id}>
-                        {(course.sections || []).filter(s => s.gender === user.gender).map(section => (
-                          <tr key={section.id}>
+                    {filteredCourses.map(course => {
+                      const prereqStatus = getPrerequisiteStatus(course);
+                      const isCompleted = completedCourseIds.has(course.id);
+                      const genderSections = (course.sections || []).filter(s => s.gender === user.gender);
+
+                      if (isCompleted) {
+                        return (
+                          <tr key={course.id} style={{ opacity: 0.5 }}>
                             <td><strong>{course.code}</strong></td>
                             <td>{course.name}</td>
                             <td><span className="badge badge-blue">{course.department_name}</span></td>
                             <td>Level {course.level}</td>
                             <td>{course.credits}</td>
-                            <td>
-                              <span className="badge badge-gray">{section.section_id}</span>
-                              <span style={{ fontSize: '0.75rem', color: '#6b7280', marginLeft: 4 }}>
-                                ({section.enrolled}/{section.capacity})
-                              </span>
-                            </td>
-                            <td>
-                              {registeredSectionIds.has(section.id) ? (
-                                <button className="btn btn-danger btn-sm" onClick={() => handleUnregister(section.id)}>Drop</button>
-                              ) : registeredCourseIds.has(course.id) ? (
-                                <span className="badge badge-green">Enrolled (other section)</span>
-                              ) : (
-                                <button className="btn btn-primary btn-sm" onClick={() => handleRegister(section.id)}>Register</button>
-                              )}
-                            </td>
+                            <td>-</td>
+                            <td>-</td>
+                            <td><span className="badge badge-green">Completed</span></td>
                           </tr>
-                        ))}
-                        {(course.sections || []).filter(s => s.gender === user.gender).length === 0 && (
+                        );
+                      }
+
+                      if (genderSections.length === 0) {
+                        return (
                           <tr key={course.id}>
                             <td><strong>{course.code}</strong></td>
                             <td>{course.name}</td>
                             <td><span className="badge badge-blue">{course.department_name}</span></td>
                             <td>Level {course.level}</td>
                             <td>{course.credits}</td>
+                            <td>
+                              {course.prerequisites.length > 0
+                                ? course.prerequisites.map(p => (
+                                    <span key={p} className={`badge ${completedCourseCodes.has(p) ? 'badge-green' : 'badge-red'}`} style={{ marginRight: 4, fontSize: '0.7rem' }}>{p}</span>
+                                  ))
+                                : <span style={{ color: '#9ca3af', fontSize: '0.8rem' }}>None</span>
+                              }
+                            </td>
                             <td><span className="badge badge-orange">No sections for {user.gender}</span></td>
                             <td>-</td>
                           </tr>
-                        )}
-                      </React.Fragment>
+                        );
+                      }
+
+                      return (
+                        <React.Fragment key={course.id}>
+                          {genderSections.map((section, sIdx) => (
+                            <tr key={section.id} style={!prereqStatus.met ? { opacity: 0.6 } : {}}>
+                              {sIdx === 0 ? (
+                                <>
+                                  <td rowSpan={genderSections.length}><strong>{course.code}</strong></td>
+                                  <td rowSpan={genderSections.length}>{course.name}</td>
+                                  <td rowSpan={genderSections.length}><span className="badge badge-blue">{course.department_name}</span></td>
+                                  <td rowSpan={genderSections.length}>Level {course.level}</td>
+                                  <td rowSpan={genderSections.length}>{course.credits}</td>
+                                  <td rowSpan={genderSections.length}>
+                                    {course.prerequisites.length > 0
+                                      ? course.prerequisites.map(p => (
+                                          <span key={p} className={`badge ${completedCourseCodes.has(p) ? 'badge-green' : 'badge-red'}`} style={{ marginRight: 4, fontSize: '0.7rem' }}>{p}</span>
+                                        ))
+                                      : <span style={{ color: '#9ca3af', fontSize: '0.8rem' }}>None</span>
+                                    }
+                                  </td>
+                                </>
+                              ) : null}
+                              <td>
+                                <span className="badge badge-gray">{section.section_id}</span>
+                                <span style={{ fontSize: '0.75rem', color: '#6b7280', marginLeft: 4 }}>
+                                  ({section.enrolled}/{section.capacity})
+                                </span>
+                              </td>
+                              <td>
+                                {!prereqStatus.met ? (
+                                  <span style={{ fontSize: '0.75rem', color: '#dc2626' }}>
+                                    Locked - complete: {prereqStatus.missing.join(', ')}
+                                  </span>
+                                ) : registeredSectionIds.has(section.id) ? (
+                                  <button className="btn btn-danger btn-sm" onClick={() => handleUnregister(section.id)}>Drop</button>
+                                ) : registeredCourseIds.has(course.id) ? (
+                                  <span className="badge badge-green">Enrolled (other section)</span>
+                                ) : (
+                                  <button className="btn btn-primary btn-sm" onClick={() => handleRegister(section.id)}>Register</button>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </React.Fragment>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </>
+        )}
+
+        {activePage === 'completed' && (
+          <>
+            <div className="page-header">
+              <h1>Completed Courses</h1>
+              <p style={{ fontSize: '0.85rem', color: '#6b7280', marginTop: 4 }}>
+                Mark courses you have already passed. This unlocks courses that require them as prerequisites.
+              </p>
+            </div>
+
+            {completedCourses.length > 0 && (
+              <div className="card" style={{ marginBottom: 24 }}>
+                <h3 style={{ marginBottom: 12 }}>Courses You Have Passed</h3>
+                <div className="table-container">
+                  <table>
+                    <thead>
+                      <tr><th>Code</th><th>Course Name</th><th>Level</th><th>Credits</th><th>Action</th></tr>
+                    </thead>
+                    <tbody>
+                      {completedCourses.map(c => (
+                        <tr key={c.id}>
+                          <td><strong>{c.code}</strong></td>
+                          <td>{c.name}</td>
+                          <td>Level {c.level}</td>
+                          <td>{c.credits}</td>
+                          <td><button className="btn btn-danger btn-sm" onClick={() => handleUnmarkCompleted(c.id)}>Remove</button></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            <div className="card">
+              <h3 style={{ marginBottom: 12 }}>All Courses - Click to Mark as Completed</h3>
+              <div className="filters" style={{ marginBottom: 16 }}>
+                <select value={filterDept} onChange={e => setFilterDept(e.target.value)}>
+                  <option value="">All Departments</option>
+                  {departments.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
+                </select>
+                <select value={filterLevel} onChange={e => setFilterLevel(e.target.value)}>
+                  <option value="">All Levels</option>
+                  {[1,2,3,4,5,6,7,8].map(l => <option key={l} value={l}>Level {l}</option>)}
+                </select>
+              </div>
+              <div className="table-container">
+                <table>
+                  <thead>
+                    <tr><th>Code</th><th>Course Name</th><th>Department</th><th>Level</th><th>Credits</th><th>Action</th></tr>
+                  </thead>
+                  <tbody>
+                    {filteredCourses.map(course => (
+                      <tr key={course.id}>
+                        <td><strong>{course.code}</strong></td>
+                        <td>{course.name}</td>
+                        <td><span className="badge badge-blue">{course.department_name}</span></td>
+                        <td>Level {course.level}</td>
+                        <td>{course.credits}</td>
+                        <td>
+                          {completedCourseIds.has(course.id) ? (
+                            <span className="badge badge-green">Completed</span>
+                          ) : (
+                            <button className="btn btn-success btn-sm" onClick={() => handleMarkCompleted(course.id)}>
+                              Mark Completed
+                            </button>
+                          )}
+                        </td>
+                      </tr>
                     ))}
                   </tbody>
                 </table>
@@ -264,6 +432,10 @@ export default function StudentDashboard() {
               <div className="stat-card">
                 <div className="stat-value">{registrations.reduce((sum, r) => sum + (courses.find(c => c.id === r.course_id)?.credits || 3), 0)}</div>
                 <div className="stat-label">Total Credits</div>
+              </div>
+              <div className="stat-card">
+                <div className="stat-value">{completedCourses.length}</div>
+                <div className="stat-label">Completed Courses</div>
               </div>
             </div>
             <div className="card">

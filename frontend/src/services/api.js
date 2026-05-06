@@ -49,6 +49,9 @@ export const registrationAPI = {
   register: (sectionId) => api.post(`/api/registration/register/${sectionId}`),
   unregister: (sectionId) => api.delete(`/api/registration/unregister/${sectionId}`),
   myRegistrations: () => api.get('/api/registration/my-registrations'),
+  getCompleted: () => api.get('/api/registration/completed'),
+  markCompleted: (courseId) => api.post(`/api/registration/complete/${courseId}`),
+  unmarkCompleted: (courseId) => api.delete(`/api/registration/uncomplete/${courseId}`),
 };
 
 export const scheduleAPI = {

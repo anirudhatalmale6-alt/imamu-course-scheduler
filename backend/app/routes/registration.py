@@ -19,6 +19,19 @@ def register_for_section(
     if not section:
         raise HTTPException(status_code=404, detail="Section not found")
 
+    course = db.query(Course).filter(Course.id == section.course_id).first()
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    if course.prerequisites:
+        completed_codes = {c.code for c in current_user.completed_courses}
+        missing = [p.code for p in course.prerequisites if p.code not in completed_codes]
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Prerequisites not met. You must complete: {', '.join(missing)}"
+            )
+
     if section in current_user.registered_sections:
         raise HTTPException(status_code=400, detail="Already registered for this section")
 
@@ -71,3 +84,50 @@ def get_my_registrations(
             "course_name": course.name if course else "",
         })
     return result
+
+
+@router.get("/completed")
+def get_completed_courses(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return [
+        {"id": c.id, "code": c.code, "name": c.name, "level": c.level, "credits": c.credits}
+        for c in current_user.completed_courses
+    ]
+
+
+@router.post("/complete/{course_id}")
+def mark_course_completed(
+    course_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    course = db.query(Course).filter(Course.id == course_id).first()
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    if course in current_user.completed_courses:
+        raise HTTPException(status_code=400, detail="Course already marked as completed")
+
+    current_user.completed_courses.append(course)
+    db.commit()
+    return {"message": f"Marked {course.code} as completed"}
+
+
+@router.delete("/uncomplete/{course_id}")
+def unmark_course_completed(
+    course_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    course = db.query(Course).filter(Course.id == course_id).first()
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    if course not in current_user.completed_courses:
+        raise HTTPException(status_code=400, detail="Course not marked as completed")
+
+    current_user.completed_courses.remove(course)
+    db.commit()
+    return {"message": f"Removed {course.code} from completed"}

@@ -367,6 +367,7 @@ tr:hover td { background: var(--gray-50); }
 .badge-green { background: #dcfce7; color: #16a34a; }
 .badge-purple { background: #f3e8ff; color: #7c3aed; }
 .badge-orange { background: #ffedd5; color: #ea580c; }
+.badge-red { background: #fef2f2; color: #dc2626; }
 .badge-gray { background: var(--gray-100); color: var(--gray-600); }
 
 /* Schedule Calendar */
