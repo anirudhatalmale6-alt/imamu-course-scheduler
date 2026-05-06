@@ -1,5 +1,7 @@
+import os
 import random
 import time
+import xml.etree.ElementTree as ET
 from typing import List
 from sqlalchemy.orm import Session
 from app.models.models import (
@@ -79,33 +81,69 @@ def _build_algorithm_data(db: Session):
 
     days = [d.name for d in days_db]
 
+    student_count = 0
+    xml_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "university.xml")
+    if not os.path.exists(xml_path):
+        xml_path = os.path.join(os.getcwd(), "university.xml")
+    if os.path.exists(xml_path):
+        try:
+            root = ET.parse(xml_path).getroot()
+            students_el = root.find("Students")
+            if students_el is not None:
+                for dept_el in students_el.findall("Department"):
+                    for lv_el in dept_el.findall("Level"):
+                        student_count += len(lv_el.findall("Student"))
+        except Exception:
+            pass
+
     return {
         "courses": courses,
         "rooms": rooms,
         "professors": professors,
         "periods": periods,
         "days": days,
+        "student_count": student_count,
     }
 
 
-def _print_data_summary(data):
+def _print_data_summary(data, loaded_sections=None):
     day_codes = [d[:3].upper() for d in data["days"]]
     class_periods = get_class_periods(data)
     prayer_periods = [p for p in data["periods"] if p["type"].lower() == "prayer"]
     prayer_labels = [f"{p['start']}-{p['end']}" for p in prayer_periods]
     male_rooms = sum(1 for r in data["rooms"] if r["gender"] == "Male")
     female_rooms = sum(1 for r in data["rooms"] if r["gender"] == "Female")
-    courses_with_prereqs = sum(1 for c in data["courses"] if c.get("prerequisites"))
-    total_sections = sum(len(c["sections"]) for c in data["courses"])
+
+    consecutive = 0
+    all_periods = data["periods"]
+    for i in range(len(all_periods) - 1):
+        curr_type = str(all_periods[i].get("type", "")).lower()
+        next_type = str(all_periods[i + 1].get("type", "")).lower()
+        if curr_type == "class" and next_type == "class":
+            consecutive += 1
+
+    num_sections = loaded_sections if loaded_sections else sum(len(c["sections"]) for c in data["courses"])
+    total_slots = len(data["rooms"]) * len(class_periods) * len(data["days"])
+
+    all_credits = [c["credits"] for c in data["courses"] if c["credits"]]
+    avg_credits = sum(all_credits) / len(all_credits) if all_credits else 3
+
+    student_count = data.get("student_count", 0)
 
     print(f"Days       : {day_codes}")
     print(f"Slots      : {len(class_periods)} class slots (from XML)")
     print(f"Prayer     : {' | '.join(prayer_labels)}")
+    print(f"Consecutive: {consecutive} valid pairs")
     print(f"Rooms : {len(data['rooms'])} ({male_rooms} M / {female_rooms} F)")
-    print(f"Instructors: {len(data['professors'])}")
-    print(f"Courses : {len(data['courses'])} ({courses_with_prereqs} with prerequisites)")
-    print(f"Sections: {total_sections}")
+    print(f"Instructors: {len(data['professors'])} (hours-based load)")
+    if student_count:
+        print(f"Students: {student_count} loaded")
+    print(f"Courses : {len(data['courses'])} (with prerequisites)")
+    print(f"Sections: {num_sections}")
+    print(f"Min loads: hours-based (avg_credits={avg_credits:.1f})")
     print(f"Depts   : {len(set(c['department'] for c in data['courses']))}")
+    status = "OK" if num_sections <= total_slots else "WARNING: OVERLOADED"
+    print(f"Slots   : {total_slots} -> {status}")
 
 
 def _get_selected_course_codes(db: Session, course_ids: List[int]):
@@ -279,6 +317,7 @@ def run_schedule_generation(
     algorithm: str = "GA",
     objective: str = "student",
     preferred_gender: str = "Male",
+    max_sections: int = 60,
 ) -> List[ScheduleResult]:
     data = _build_algorithm_data(db)
     selected_codes = _get_selected_course_codes(db, selected_course_ids)
@@ -286,9 +325,12 @@ def run_schedule_generation(
     if not selected_codes:
         return []
 
-    _print_data_summary(data)
+    from app.algorithms.common import get_selected_course_sections
+    loaded = get_selected_course_sections(selected_codes, data, preferred_gender, max_sections=max_sections)
+    loaded_count = len(loaded)
+
+    _print_data_summary(data, loaded_sections=loaded_count)
     print(f"Selected : {len(selected_codes)} courses ({', '.join(selected_codes)})")
-    print(f"Gender   : {preferred_gender}")
     print(f"Algorithm: {algorithm.upper()}")
 
     results = []

@@ -167,30 +167,17 @@ def make_cohort_key(course, section, gender):
     return f"{normalize_gender(gender)}-{department}-L{level}-{section_group}"
 
 
-def get_selected_course_sections(selected_courses, data, gender):
+def get_selected_course_sections(selected_courses, data, gender, max_sections=60):
     selected_set = set(selected_courses)
-    selected_sections = []
 
+    course_sections = {}
     for course in data["courses"]:
-        course_selected = course["id"] in selected_set
-
-        matching_sections = []
-
+        if course["id"] not in selected_set:
+            continue
+        secs = []
         for section in course["sections"]:
-            section_selected = section["id"] in selected_set
-
-            if not course_selected and not section_selected:
-                continue
-
-            if not gender_matches(section.get("gender"), gender):
-                continue
-
-            matching_sections.append(section)
-
-        if course_selected and matching_sections:
-            section = matching_sections[0]
-
-            selected_sections.append({
+            sec_gender = normalize_gender(section.get("gender"))
+            secs.append({
                 "course_id": course["id"],
                 "course_name": course["name"],
                 "department": course.get("department", ""),
@@ -199,42 +186,44 @@ def get_selected_course_sections(selected_courses, data, gender):
                 "course_type": course.get("type", ""),
                 "prerequisites": parse_prerequisites(course.get("prerequisites")),
                 "section_id": section["id"],
-                "section_gender": normalize_gender(section.get("gender")),
+                "section_gender": sec_gender,
                 "section_capacity": safe_int(section.get("capacity")),
                 "waitlist": safe_int(section.get("waitlist")),
-                "cohort_key": make_cohort_key(course, section, gender)
+                "cohort_key": make_cohort_key(course, section, sec_gender)
             })
+        if secs:
+            course_sections[course["id"]] = secs
 
-        elif not course_selected:
-            for section in matching_sections:
-                selected_sections.append({
-                    "course_id": course["id"],
-                    "course_name": course["name"],
-                    "department": course.get("department", ""),
-                    "level": course.get("level", ""),
-                    "credits": safe_int(course.get("credits")),
-                    "course_type": course.get("type", ""),
-                    "prerequisites": parse_prerequisites(course.get("prerequisites")),
-                    "section_id": section["id"],
-                    "section_gender": normalize_gender(section.get("gender")),
-                    "section_capacity": safe_int(section.get("capacity")),
-                    "waitlist": safe_int(section.get("waitlist")),
-                    "cohort_key": make_cohort_key(course, section, gender)
-                })
+    selected_sections = []
+    round_idx = 0
+    while max_sections is None or len(selected_sections) < max_sections:
+        added = 0
+        for cid in course_sections:
+            if max_sections and len(selected_sections) >= max_sections:
+                break
+            secs = course_sections[cid]
+            if round_idx >= len(secs):
+                continue
+            selected_sections.append(secs[round_idx])
+            added += 1
+        if added == 0:
+            break
+        round_idx += 1
 
     return selected_sections
 
 
 def create_assignment(section, data, gender):
+    sec_gender = section["section_gender"]
     rooms = get_available_rooms(
         data,
-        gender,
+        sec_gender,
         required_capacity=section["section_capacity"]
     )
 
     professors = get_available_professors(
         data,
-        gender,
+        sec_gender,
         department=section["department"]
     )
 
