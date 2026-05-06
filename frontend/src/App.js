@@ -7,12 +7,17 @@ import StudentDashboard from './pages/StudentDashboard';
 import InstructorDashboard from './pages/InstructorDashboard';
 import './App.css';
 
+function getHomePath(role) {
+  if (role === 'instructor' || role === 'admin') return '/instructor';
+  return '/student';
+}
+
 function ProtectedRoute({ children, allowedRoles }) {
   const { user, loading } = useAuth();
   if (loading) return <div className="loading">Loading...</div>;
   if (!user) return <Navigate to="/login" />;
   if (allowedRoles && !allowedRoles.includes(user.role)) {
-    return <Navigate to={user.role === 'instructor' ? '/instructor' : '/student'} />;
+    return <Navigate to={getHomePath(user.role)} />;
   }
   return children;
 }
@@ -23,11 +28,11 @@ function AppRoutes() {
 
   return (
     <Routes>
-      <Route path="/login" element={user ? <Navigate to={user.role === 'instructor' ? '/instructor' : '/student'} /> : <LoginPage />} />
-      <Route path="/register" element={user ? <Navigate to={user.role === 'instructor' ? '/instructor' : '/student'} /> : <RegisterPage />} />
+      <Route path="/login" element={user ? <Navigate to={getHomePath(user.role)} /> : <LoginPage />} />
+      <Route path="/register" element={user ? <Navigate to={getHomePath(user.role)} /> : <RegisterPage />} />
       <Route path="/student/*" element={<ProtectedRoute allowedRoles={['student']}><StudentDashboard /></ProtectedRoute>} />
       <Route path="/instructor/*" element={<ProtectedRoute allowedRoles={['instructor', 'admin']}><InstructorDashboard /></ProtectedRoute>} />
-      <Route path="*" element={<Navigate to={user ? (user.role === 'instructor' ? '/instructor' : '/student') : '/login'} />} />
+      <Route path="*" element={<Navigate to={user ? getHomePath(user.role) : '/login'} />} />
     </Routes>
   );
 }

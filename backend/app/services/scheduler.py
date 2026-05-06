@@ -12,6 +12,8 @@ from app.algorithms.common import (
     copy_position,
     repair_schedule,
     sort_schedule,
+    randomize_assignment,
+    get_class_periods,
 )
 from app.algorithms.pso_algorithm import run_pso_algorithm
 
@@ -86,6 +88,26 @@ def _build_algorithm_data(db: Session):
     }
 
 
+def _print_data_summary(data):
+    day_codes = [d[:3].upper() for d in data["days"]]
+    class_periods = get_class_periods(data)
+    prayer_periods = [p for p in data["periods"] if p["type"].lower() == "prayer"]
+    prayer_labels = [f"{p['start']}-{p['end']}" for p in prayer_periods]
+    male_rooms = sum(1 for r in data["rooms"] if r["gender"] == "Male")
+    female_rooms = sum(1 for r in data["rooms"] if r["gender"] == "Female")
+    courses_with_prereqs = sum(1 for c in data["courses"] if c.get("prerequisites"))
+    total_sections = sum(len(c["sections"]) for c in data["courses"])
+
+    print(f"Days       : {day_codes}")
+    print(f"Slots      : {len(class_periods)} class slots (from XML)")
+    print(f"Prayer     : {' | '.join(prayer_labels)}")
+    print(f"Rooms : {len(data['rooms'])} ({male_rooms} M / {female_rooms} F)")
+    print(f"Instructors: {len(data['professors'])}")
+    print(f"Courses : {len(data['courses'])} ({courses_with_prereqs} with prerequisites)")
+    print(f"Sections: {total_sections}")
+    print(f"Depts   : {len(set(c['department'] for c in data['courses']))}")
+
+
 def _get_selected_course_codes(db: Session, course_ids: List[int]):
     courses = db.query(Course).filter(Course.id.in_(course_ids)).all()
     return [c.code for c in courses]
@@ -124,12 +146,16 @@ def _schedule_to_slots(schedule) -> List[ScheduleSlot]:
 
 def _run_ga_with_client_algorithm(
     selected_codes, data, gender, objective="student",
-    pop_size=60, generations=200, max_no_improvement=40
+    pop_size=60, generations=500, max_no_improvement=100,
+    run_number=None, total_runs=None,
 ):
     start_time = time.time()
 
     if not selected_codes:
         return [], 0, {}
+
+    if run_number is not None:
+        print(f"  Run {run_number}/{total_runs or '?'}")
 
     population = []
     scores = []
@@ -182,10 +208,9 @@ def _run_ga_with_client_algorithm(
                     child.append(parent2[k].copy())
 
             mutation_rate = 0.15
-            for item in child:
+            for idx_c in range(len(child)):
                 if random.random() < mutation_rate:
-                    from app.algorithms.common import randomize_assignment
-                    child[child.index(item)] = randomize_assignment(item, data, gender)
+                    child[idx_c] = randomize_assignment(child[idx_c], data, gender)
 
             child = repair_schedule(child, data, gender)
             child_score, _ = calculate_fitness(child)
@@ -204,17 +229,29 @@ def _run_ga_with_client_algorithm(
         else:
             no_improvement += 1
 
+        fitness_val = 1.0 / (1.0 + global_best_score) if global_best_score >= 0 else 0
+        elapsed = time.time() - start_time
+
+        if (gen + 1) % 100 == 0 or gen == 0:
+            print(f"    Gen {gen + 1:5d} | Conflicts: {global_best_score:6.2f} | Fitness: {fitness_val:.4f} | {elapsed:.1f}s")
+
         if global_best_stats and global_best_stats["feasible"]:
             if global_best_stats["student_gaps"] == 0 and global_best_stats["instructor_gaps"] == 0:
+                print(f"    Gen {gen + 1:5d} | OPTIMAL - no gaps | {elapsed:.1f}s")
                 break
 
         if no_improvement >= max_no_improvement:
+            print(f"    Stopped: no improvement for {max_no_improvement} generations")
             break
 
     final_schedule = sort_schedule(global_best)
     final_score, final_stats = calculate_fitness(final_schedule)
     final_stats["computation_time"] = round(time.time() - start_time, 3)
     final_stats["iterations_completed"] = iterations_completed
+
+    elapsed = time.time() - start_time
+    status = "FEASIBLE" if final_stats["feasible"] else f"{final_stats['hard_violations']} hard violations"
+    print(f"    Result: {status} | Conflicts: {final_score:.2f} | Time: {elapsed:.2f}s | Gens: {iterations_completed}")
 
     return final_schedule, final_score, final_stats
 
@@ -248,9 +285,18 @@ def run_schedule_generation(
     if not selected_codes:
         return []
 
+    _print_data_summary(data)
+    print(f"Selected : {len(selected_codes)} courses ({', '.join(selected_codes)})")
+    print(f"Gender   : {preferred_gender}")
+    print(f"Algorithm: {algorithm.upper()}")
+
     results = []
 
     if algorithm.upper() == "PSO":
+        print(f"\n{'='*60}")
+        print(f"  PSO-Optimized  (top 3)")
+        print(f"{'='*60}")
+
         schedule, score, stats = run_pso_algorithm(
             selected_courses=selected_codes,
             data=data,
@@ -258,6 +304,9 @@ def run_schedule_generation(
             swarm_size=50,
             iterations=150,
             max_no_improvement=40,
+            label="PSO-Optimized",
+            run_number=1,
+            total_runs=3,
         )
 
         if schedule:
@@ -281,6 +330,9 @@ def run_schedule_generation(
                 swarm_size=30,
                 iterations=80,
                 max_no_improvement=25,
+                label=f"PSO Alternative {run + 1}",
+                run_number=run + 2,
+                total_runs=3,
             )
             if extra_schedule:
                 extra_slots = _schedule_to_slots(extra_schedule)
@@ -302,13 +354,18 @@ def run_schedule_generation(
     else:
         if objective == "all":
             for obj in ["university", "instructor", "student"]:
+                meta = OBJ_META.get(obj, {"label": obj.title(), "description": ""})
+                print(f"\n{'='*60}")
+                print(f"  {meta['label']}  (top 1)")
+                print(f"{'='*60}")
+
                 schedule, score, stats = _run_ga_with_client_algorithm(
-                    selected_codes, data, preferred_gender, objective=obj
+                    selected_codes, data, preferred_gender, objective=obj,
+                    run_number=1, total_runs=1,
                 )
                 if schedule:
                     slots = _schedule_to_slots(schedule)
                     fitness_val = 1.0 / (1.0 + score) if score >= 0 else 0
-                    meta = OBJ_META.get(obj, {"label": obj.title(), "description": ""})
                     results.append(ScheduleResult(
                         rank=len(results) + 1,
                         label=meta["label"],
@@ -319,14 +376,19 @@ def run_schedule_generation(
                         slots=slots,
                     ))
         else:
+            meta = OBJ_META.get(objective, {"label": objective.title(), "description": ""})
+            print(f"\n{'='*60}")
+            print(f"  {meta['label']}  (top 3)")
+            print(f"{'='*60}")
+
             for run in range(3):
                 schedule, score, stats = _run_ga_with_client_algorithm(
-                    selected_codes, data, preferred_gender, objective=objective
+                    selected_codes, data, preferred_gender, objective=objective,
+                    run_number=run + 1, total_runs=3,
                 )
                 if schedule:
                     slots = _schedule_to_slots(schedule)
                     fitness_val = 1.0 / (1.0 + score) if score >= 0 else 0
-                    meta = OBJ_META.get(objective, {"label": objective.title(), "description": ""})
                     results.append(ScheduleResult(
                         rank=run + 1,
                         label=meta["label"] if run == 0 else f"{meta['label']} (Alt {run})",
@@ -340,5 +402,9 @@ def run_schedule_generation(
         results.sort(key=lambda r: r.fitness, reverse=True)
         for i, r in enumerate(results, 1):
             r.rank = i
+
+    print(f"\n{'='*60}")
+    print(f"  Done. {len(results)} schedules generated.")
+    print(f"{'='*60}\n")
 
     return results[:3]

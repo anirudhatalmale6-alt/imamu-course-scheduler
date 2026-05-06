@@ -15,7 +15,10 @@ def run_pso_algorithm(
     gender,
     swarm_size=50,
     iterations=150,
-    max_no_improvement=40
+    max_no_improvement=40,
+    label="PSO",
+    run_number=None,
+    total_runs=None,
 ):
     start_time = time.time()
 
@@ -45,6 +48,9 @@ def run_pso_algorithm(
 
     if not selected_courses:
         return [], 0, empty_stats
+
+    if run_number is not None:
+        print(f"  Run {run_number}/{total_runs or '?'}")
 
     particles = []
     personal_best_positions = []
@@ -109,11 +115,19 @@ def run_pso_algorithm(
         else:
             no_improvement_count += 1
 
+        fitness_val = 1.0 / (1.0 + global_best_score) if global_best_score >= 0 else 0
+        elapsed = time.time() - start_time
+
+        if (iteration + 1) % 10 == 0 or iteration == 0:
+            print(f"    Iter {iteration + 1:5d} | Conflicts: {global_best_score:6.2f} | Fitness: {fitness_val:.4f} | {elapsed:.1f}s")
+
         if global_best_stats and global_best_stats["feasible"]:
             if global_best_stats["student_gaps"] == 0 and global_best_stats["instructor_gaps"] == 0:
+                print(f"    Iter {iteration + 1:5d} | OPTIMAL - no gaps | {elapsed:.1f}s")
                 break
 
         if no_improvement_count >= max_no_improvement:
+            print(f"    Stopped: no improvement for {max_no_improvement} iterations")
             break
 
     final_schedule = sort_schedule(global_best_position)
@@ -122,5 +136,9 @@ def run_pso_algorithm(
 
     final_stats["computation_time"] = round(time.time() - start_time, 3)
     final_stats["iterations_completed"] = iterations_completed
+
+    elapsed = time.time() - start_time
+    status = "FEASIBLE" if final_stats["feasible"] else f"{final_stats['hard_violations']} hard violations"
+    print(f"    Result: {status} | Conflicts: {final_score:.2f} | Time: {elapsed:.2f}s | Iters: {iterations_completed}")
 
     return final_schedule, final_score, final_stats
