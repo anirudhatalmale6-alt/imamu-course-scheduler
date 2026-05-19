@@ -9,3 +9,4 @@ backend/static/
 *.egg-info/
 dist/
 build/
+venv/
